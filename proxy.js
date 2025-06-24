@@ -8,35 +8,42 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-let hostSocket = null;
-let guestSocket = null;
+let rooms = {};
 
 wss.on('connection', (ws, req) => {
-    // Identificación simple por query param: ?role=host o ?role=guest
-    const url = req.url || '';
-    if (url.includes('role=host')) {
-        if (hostSocket) hostSocket.close();
-        hostSocket = ws;
-        ws.send('Conectado como HOST');
-        console.log('Host conectado');
+    // Extraer parámetros de la URL
+    const url = new URL(req.url, 'http://localhost');
+    const role = url.searchParams.get('role');
+    const room = url.searchParams.get('room');
+    if (!role || !room) {
+        ws.close();
+        return;
+    }
+    if (!rooms[room]) {
+        rooms[room] = { host: null, guest: null };
+    }
+    if (role === 'host') {
+        if (rooms[room].host) rooms[room].host.close();
+        rooms[room].host = ws;
+        ws.send('Conectado como HOST en sala ' + room);
+        console.log('Host conectado en sala', room);
         ws.on('close', () => {
-            hostSocket = null;
-            console.log('Host desconectado');
+            rooms[room].host = null;
+            console.log('Host desconectado en sala', room);
         });
         ws.on('message', (data) => {
-            // Reenviar audio al invitado si está conectado
-            if (guestSocket && guestSocket.readyState === WebSocket.OPEN) {
-                guestSocket.send(data);
+            if (rooms[room].guest && rooms[room].guest.readyState === WebSocket.OPEN) {
+                rooms[room].guest.send(data);
             }
         });
-    } else if (url.includes('role=guest')) {
-        if (guestSocket) guestSocket.close();
-        guestSocket = ws;
-        ws.send('Conectado como INVITADO');
-        console.log('Invitado conectado');
+    } else if (role === 'guest') {
+        if (rooms[room].guest) rooms[room].guest.close();
+        rooms[room].guest = ws;
+        ws.send('Conectado como INVITADO en sala ' + room);
+        console.log('Invitado conectado en sala', room);
         ws.on('close', () => {
-            guestSocket = null;
-            console.log('Invitado desconectado');
+            rooms[room].guest = null;
+            console.log('Invitado desconectado en sala', room);
         });
     } else {
         ws.close();
