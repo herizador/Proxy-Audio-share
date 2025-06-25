@@ -3,6 +3,7 @@ const fs = require('fs');
 const http = require('http');
 const WebSocket = require('ws');
 const express = require('express');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -172,6 +173,13 @@ wss.on('connection', (ws, req) => {
 
 app.get('/', (req, res) => {
     res.send('Proxy WSS/WS para AudioShare funcionando.');
+});
+
+// Manejar favicon.ico
+app.get('/favicon.ico', (req, res) => {
+    res.set('Content-Type', 'image/x-icon');
+    // Enviar un favicon vacío para evitar el error 404
+    res.status(200).send('');
 });
 
 const PORT = process.env.PORT || 3000;
