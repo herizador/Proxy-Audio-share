@@ -10,14 +10,14 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ 
     server,
     perMessageDeflate: false, // Desactivar compresión para menor latencia
-    maxPayload: 8192 // 8KB máximo por mensaje
+    maxPayload: 32768 // Aumentado a 32KB para manejar buffers más grandes
 });
 
 // Configuración optimizada para audio en tiempo real
 const CLEANUP_INTERVAL = 30000; // 30 segundos
 const INACTIVE_TIMEOUT = 60000;  // 60 segundos
-const MAX_PACKET_SIZE = 2048;    // 2KB por paquete (optimizado)
-const MAX_BUFFER_SIZE = 16384;   // 16KB máximo en buffer
+const MAX_PACKET_SIZE = 8192;    // Aumentado a 8KB por paquete
+const MAX_BUFFER_SIZE = 65536;   // Aumentado a 64KB para mejor calidad
 
 // Almacenamiento de salas y conexiones
 const rooms = new Map();
@@ -31,39 +31,63 @@ class Room {
         this.bufferSize = 0;
         this.lastPacketTime = 0;
         this.packetsReceived = 0;
+        this.sampleRate = 16000; // Sample rate de Android
+        this.frameSize = 2048;   // Tamaño de frame típico de Android
     }
 
     addAudioData(data) {
         const now = Date.now();
         
-        // Control de tasa de paquetes
+        // Control de buffer más permisivo
         if (this.lastPacketTime > 0) {
             const timeDiff = now - this.lastPacketTime;
-            if (timeDiff < 10) { // Si llegan paquetes muy juntos
-                return; // Ignorar paquetes muy frecuentes
+            if (timeDiff < 5) { // Reducido a 5ms para mayor frecuencia
+                // En lugar de descartar, intentamos procesar
+                this.processAudioPacket(data);
             }
         }
         this.lastPacketTime = now;
         
-        // Control de buffer más eficiente
-        this.audioBuffer.push(data);
-        this.bufferSize += data.length;
+        this.processAudioPacket(data);
+    }
+
+    processAudioPacket(data) {
+        // Asegurarse de que el dato es un Buffer
+        const audioData = Buffer.isBuffer(data) ? data : Buffer.from(data);
         
-        // Mantener el buffer en un tamaño óptimo
-        while (this.bufferSize > MAX_BUFFER_SIZE) {
-            const oldData = this.audioBuffer.shift();
-            this.bufferSize -= oldData.length;
+        // Verificar si el buffer está alineado con el tamaño de frame
+        if (audioData.length % 2 === 0) { // Asegurar que tenemos muestras completas (16-bit)
+            this.audioBuffer.push(audioData);
+            this.bufferSize += audioData.length;
+            
+            // Mantener el buffer en un tamaño óptimo
+            while (this.bufferSize > MAX_BUFFER_SIZE) {
+                const oldData = this.audioBuffer.shift();
+                if (oldData) {
+                    this.bufferSize -= oldData.length;
+                }
+            }
+            
+            this.packetsReceived++;
         }
-        
-        this.packetsReceived++;
     }
 
     broadcast(data, sender) {
         const targets = sender === this.host ? this.guests : new Set([this.host]);
+        
+        // Si es datos de audio, asegurarse de que sea un Buffer
+        const audioData = data instanceof Buffer ? data : 
+                         (typeof data === 'string' ? Buffer.from(data) : data);
+        
         targets.forEach(client => {
             if (client && client.readyState === WebSocket.OPEN) {
                 try {
-                    client.send(data, { binary: data instanceof Buffer });
+                    // Enviar como binary si es Buffer
+                    const options = { 
+                        binary: audioData instanceof Buffer,
+                        compress: false // Desactivar compresión para menor latencia
+                    };
+                    client.send(audioData, options);
                 } catch (error) {
                     console.error('Error al enviar datos:', error);
                     this.removeClient(client);
@@ -76,12 +100,17 @@ class Room {
         if (client === this.host) {
             this.host = null;
             this.broadcast('host_disconnected', null);
+            // Limpiar buffer al desconectar el host
+            this.audioBuffer = [];
+            this.bufferSize = 0;
         } else {
             this.guests.delete(client);
         }
         
         try {
-            client.close();
+            if (client.readyState === WebSocket.OPEN) {
+                client.close();
+            }
         } catch (e) {
             console.error('Error al cerrar cliente:', e);
         }
@@ -113,8 +142,9 @@ wss.on('connection', (ws, req) => {
 
     let room = rooms.get(roomId);
     
-    // Configurar WebSocket para baja latencia
+    // Configurar socket para audio en tiempo real
     ws._socket.setNoDelay(true);
+    ws._socket.setKeepAlive(true, 1000);
     
     if (role === 'host') {
         if (!room) {
@@ -140,7 +170,8 @@ wss.on('connection', (ws, req) => {
         room.lastActivity = Date.now();
         
         if (data instanceof Buffer) {
-            if (ws === room.host && data.length <= MAX_PACKET_SIZE) {
+            if (ws === room.host) {
+                // Procesar datos de audio sin límite de tamaño estricto
                 room.addAudioData(data);
                 room.broadcast(data, ws);
             }
