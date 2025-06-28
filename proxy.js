@@ -18,6 +18,8 @@ const CLEANUP_INTERVAL = 30000; // 30 segundos
 const INACTIVE_TIMEOUT = 60000;  // 60 segundos
 const MAX_PACKET_SIZE = 8192;    // Aumentado a 8KB por paquete
 const MAX_BUFFER_SIZE = 65536;   // Aumentado a 64KB para mejor calidad
+const HEARTBEAT_INTERVAL = 2000; // 2 segundos para heartbeat
+const HEARTBEAT_TIMEOUT = 6000;  // 6 segundos sin heartbeat = desconexión
 
 // Almacenamiento de salas y conexiones
 const rooms = new Map();
@@ -146,6 +148,51 @@ wss.on('connection', (ws, req) => {
     ws._socket.setNoDelay(true);
     ws._socket.setKeepAlive(true, 1000);
     
+    // Configurar heartbeat
+    ws.isAlive = true;
+    ws.lastHeartbeat = Date.now();
+    
+    const heartbeat = () => {
+        ws.isAlive = true;
+        ws.lastHeartbeat = Date.now();
+    };
+    
+    // Enviar ping cada HEARTBEAT_INTERVAL
+    const pingInterval = setInterval(() => {
+        if (!ws.isAlive) {
+            clearInterval(pingInterval);
+            console.log(`Cliente ${role} en sala ${roomId} desconectado por inactividad`);
+            if (room) {
+                room.removeClient(ws);
+                if (!room.host && room.guests.size === 0) {
+                    rooms.delete(roomId);
+                }
+            }
+            return ws.terminate();
+        }
+        
+        ws.isAlive = false;
+        try {
+            ws.ping();
+        } catch (e) {
+            clearInterval(pingInterval);
+            ws.terminate();
+        }
+    }, HEARTBEAT_INTERVAL);
+    
+    ws.on('pong', heartbeat);
+    
+    // Limpiar intervalo al cerrar
+    ws.on('close', () => {
+        clearInterval(pingInterval);
+        if (room) {
+            room.removeClient(ws);
+            if (!room.host && room.guests.size === 0) {
+                rooms.delete(roomId);
+            }
+        }
+    });
+
     if (role === 'host') {
         if (!room) {
             room = new Room();
@@ -181,15 +228,6 @@ wss.on('connection', (ws, req) => {
                 room.broadcast(message, ws);
             } catch (error) {
                 console.error('Error al procesar mensaje:', error);
-            }
-        }
-    });
-
-    ws.on('close', () => {
-        if (room) {
-            room.removeClient(ws);
-            if (!room.host && room.guests.size === 0) {
-                rooms.delete(roomId);
             }
         }
     });
